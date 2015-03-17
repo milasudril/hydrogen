@@ -600,52 +600,54 @@ void audioEngine_seek( long long nFrames, bool bLoopMode )
 
 inline void audioEngine_process_transport()
 {
+	if ( m_audioEngineState != STATE_READY
+	  && m_audioEngineState != STATE_PLAYING
+	) return;
+
+	m_pAudioDriver->updateTransportInfo();
+
 	Hydrogen* pHydrogen = Hydrogen::get_instance();
 	Song* pSong = pHydrogen->getSong();
 
-	if ( ( m_audioEngineState == STATE_READY )
-		 || ( m_audioEngineState == STATE_PLAYING )
-		 ) {
-		m_pAudioDriver->updateTransportInfo();
-		unsigned long nNewFrames = m_pAudioDriver->m_transport.m_nFrames;
-
-		// ??? audioEngine_seek returns IMMEDIATELY
-		// when nNewFrames == m_pAudioDriver->m_transport.m_nFrames ???
-		// audioEngine_seek( nNewFrames, true );
-
-		switch ( m_pAudioDriver->m_transport.m_status ) {
-		case TransportInfo::ROLLING:
-			if ( m_audioEngineState == STATE_READY ) {
-				audioEngine_start( false, nNewFrames );	// no engine lock
-			}
-
-			if ( pSong->__bpm != m_pAudioDriver->m_transport.m_nBPM ) {
-				___INFOLOG(
-							QString( "song bpm: (%1) gets transport bpm: (%2)" )
-							.arg( pSong->__bpm )
-							.arg( m_pAudioDriver->m_transport.m_nBPM ) );
-
-				pSong->__bpm = m_pAudioDriver->m_transport.m_nBPM;
-			}
-
-			pHydrogen->setRealtimeFrames( m_pAudioDriver->m_transport.m_nFrames );
-			break;
-		case TransportInfo::STOPPED:
-			if ( m_audioEngineState == STATE_PLAYING ) {
-				audioEngine_stop( false );	// no engine lock
-			}
-
-			if ( pSong->__bpm != m_pAudioDriver->m_transport.m_nBPM ) {
-				pSong->__bpm = m_pAudioDriver->m_transport.m_nBPM;
-			}
-
-			// go ahead and increment the realtimeframes by buffersize
-			// to support our realtime keyboard and midi event timing
-			// TODO: use method like setRealtimeFrames
-			m_nRealtimeFrames += m_nBufferSize;
-			break;
+	// Update frame position
+	// ??? audioEngine_seek returns IMMEDIATELY
+	// when nNewFrames == m_pAudioDriver->m_transport.m_nFrames ???
+	// audioEngine_seek( nNewFrames, true );
+	switch ( m_pAudioDriver->m_transport.m_status ) {
+	case TransportInfo::ROLLING:
+		if ( m_audioEngineState == STATE_READY ) {
+			// false == no engine lock. Already locked
+			// this should set STATE_PLAYING
+			audioEngine_start( false, m_pAudioDriver->m_transport.m_nFrames );
 		}
-	} /* if m_audioEngineState */
+
+		// So, we are not playing even after attempt to start engine
+		if ( m_audioEngineState != STATE_PLAYING ) return;
+
+		/* Now we're playing | Update BPM */
+		if ( pSong->__bpm != m_pAudioDriver->m_transport.m_nBPM ) {
+			___INFOLOG( QString( "song bpm: (%1) gets transport bpm: (%2)" )
+				.arg( pSong->__bpm )
+				.arg( m_pAudioDriver->m_transport.m_nBPM )
+			);
+			pHydrogen->setBPM ( m_pAudioDriver->m_transport.m_nBPM );
+		}
+
+		pHydrogen->setRealtimeFrames( m_pAudioDriver->m_transport.m_nFrames );
+		break;
+	case TransportInfo::STOPPED:
+		// So, we are not playing even after attempt to start engine
+		if ( m_audioEngineState == STATE_PLAYING ) {
+			// false == no engine lock. Already locked
+			audioEngine_stop( false );
+		}
+
+		// go ahead and increment the realtimeframes by buffersize
+		// to support our realtime keyboard and midi event timing
+		// TODO: use method like setRealtimeFrames
+		m_nRealtimeFrames += m_nBufferSize;
+		break;
+	}
 }
 
 void audioEngine_clearNoteQueue()
@@ -1030,7 +1032,7 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 	Hydrogen* pHydrogen = Hydrogen::get_instance();
 	Song* pSong = pHydrogen->getSong();
 
-	static int nLastTick = -1;
+//	static int nLastTick = -1;
 	bool bSendPatternChange = false;
 	int nMaxTimeHumanize = 2000;
 	int nLeadLagFactor = m_pAudioDriver->m_transport.m_nTickSize * 5;  // 5 ticks
@@ -1043,8 +1045,6 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 		framepos = pHydrogen->getRealtimeFrames();
 	}
 
-	int tickNumber_start = 0;
-
 	// We need to look ahead in the song for notes with negative offsets
 	// from LeadLag or Humanize.  When starting from the beginning, we prime
 	// the note queue with notes between 0 and nFrames plus
@@ -1053,50 +1053,34 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 	int lookahead = nLeadLagFactor + nMaxTimeHumanize + 1;
 	m_nLookaheadFrames = lookahead;
 
+	int tickNumber_start = 0;
 	if ( framepos == 0
 		 || ( m_audioEngineState == STATE_PLAYING
 			  && pSong->get_mode() == Song::SONG_MODE
 			  && m_nSongPos == -1 )
-		 ) {
-		tickNumber_start = (int)( framepos
-								  / m_pAudioDriver->m_transport.m_nTickSize );
+	) {
+		tickNumber_start = framepos / m_pAudioDriver->m_transport.m_nTickSize;
 	} else {
-		tickNumber_start = (int)( (framepos + lookahead)
-								  / m_pAudioDriver->m_transport.m_nTickSize );
+		tickNumber_start = ( framepos + lookahead) / m_pAudioDriver->m_transport.m_nTickSize;
 	}
-
-	int tickNumber_end = (int) ( (framepos + nFrames + lookahead)
-								 / m_pAudioDriver->m_transport.m_nTickSize );
-
-	int tick = tickNumber_start;
+	int tickNumber_end = ( framepos + nFrames + lookahead ) / m_pAudioDriver->m_transport.m_nTickSize;
 
 	// 	___WARNINGLOG( "Lookahead: " + to_string( lookahead
 	//	                                        / m_pAudioDriver->m_transport.m_nTickSize ) );
 	// get initial timestamp for first tick
 	gettimeofday( &m_currentTickTime, NULL );
 
-	while ( tick <= tickNumber_end ) {
-		if ( tick == nLastTick ) {
-			++tick;
-			continue;
-		} else {
-			nLastTick = tick;
-		}
-
-
+	for ( int tick = tickNumber_start; tick < tickNumber_end; tick++ ) {
 		// midi events now get put into the m_songNoteQueue as well,
 		// based on their timestamp
 		while ( m_midiNoteQueue.size() > 0 ) {
 			Note *note = m_midiNoteQueue[0];
+			if ( note->get_position() > tick ) break;
 
-			if ( ( int )note->get_position() <= tick ) {
-				// printf ("tick=%d  pos=%d\n", tick, note->getPosition());
-				m_midiNoteQueue.pop_front();
-				note->get_instrument()->enqueue();
-				m_songNoteQueue.push( note );
-			} else {
-				break;
-			}
+			// printf ("tick=%d  pos=%d\n", tick, note->getPosition());
+			m_midiNoteQueue.pop_front();
+			note->get_instrument()->enqueue();
+			m_songNoteQueue.push( note );
 		}
 
 		if (  m_audioEngineState != STATE_PLAYING ) {
@@ -1123,10 +1107,7 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				return -1;
 			}
 
-			m_nSongPos = findPatternInTick( tick,
-											pSong->is_loop_enabled(),
-											&m_nPatternStartTick
-											);
+			m_nSongPos = findPatternInTick( tick, pSong->is_loop_enabled(), &m_nPatternStartTick );
 
 			if ( m_nSongSizeInTicks != 0 ) {
 				m_nPatternTickPosition = ( tick - m_nPatternStartTick )
@@ -1135,19 +1116,15 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				m_nPatternTickPosition = tick - m_nPatternStartTick;
 			}
 
-
 			if ( m_nPatternTickPosition == 0 ) {
 				bSendPatternChange = true;
 			}
 
-			//			PatternList *pPatternList =
-			//				 (*(pSong->getPatternGroupVector()))[m_nSongPos];
+			// PatternList *pPatternList = (*(pSong->getPatternGroupVector()))[m_nSongPos];
 			if ( m_nSongPos == -1 ) {
 				___INFOLOG( "song pos = -1" );
 				if ( pSong->is_loop_enabled() == true ) {
-					m_nSongPos = findPatternInTick( 0,
-													true,
-													&m_nPatternStartTick );
+					m_nSongPos = findPatternInTick( 0, true, &m_nPatternStartTick );
 				} else {
 
 					___INFOLOG( "End of Song" );
@@ -1178,7 +1155,6 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 			//m_nPatternTickPosition = tick % m_pCurrentPattern->getSize();
 			int nPatternSize = MAX_NOTES;
 
-
 			if ( Preferences::get_instance()->patternModePlaysSelected() )
 			{
 				m_pPlayingPatterns->clear();
@@ -1186,7 +1162,6 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				m_pPlayingPatterns->add( pattern );
 				pattern->extand_with_flattened_virtual_patterns( m_pPlayingPatterns );
 			}
-
 
 			if ( m_pPlayingPatterns->size() != 0 ) {
 				Pattern *pFirstPattern = m_pPlayingPatterns->get( 0 );
@@ -1201,14 +1176,10 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				 || ( m_nPatternStartTick == -1 ) ) {
 				if ( m_pNextPatterns->size() > 0 ) {
 					Pattern * p;
-					for ( uint i = 0;
-						  i < m_pNextPatterns->size();
-						  i++ ) {
+					for ( uint i = 0; i < m_pNextPatterns->size(); i++ ) {
 						p = m_pNextPatterns->get( i );
-						// 						___WARNINGLOG( QString( "Got pattern # %1" )
-						//							     .arg( i + 1 ) );
-						// if the pattern isn't playing
-						// already, start it now.
+						// ___WARNINGLOG( QString( "Got pattern # %1" ).arg( i + 1 ) );
+						// if the pattern isn't playing, already, start it now.
 						if ( ( m_pPlayingPatterns->del( p ) ) == NULL ) {
 							m_pPlayingPatterns->add( p );
 						}
@@ -1218,12 +1189,12 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				}
 				if ( m_nPatternStartTick == -1 ) {
 					m_nPatternStartTick = tick - (tick % nPatternSize);
-					// 					___WARNINGLOG( "set Pattern Start Tick to "
-					//						     + to_string( m_nPatternStartTick ) );
+					// ___WARNINGLOG( "set Pattern Start Tick to " ) + to_string( m_nPatternStartTick ) );
 				} else {
 					m_nPatternStartTick = tick;
 				}
 			}
+
 			m_nPatternTickPosition = tick - m_nPatternStartTick;
 			if ( m_nPatternTickPosition > nPatternSize ) {
 				m_nPatternTickPosition = tick % nPatternSize;
@@ -1231,8 +1202,7 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 		}
 
 		// metronome
-		// 		if (  ( m_nPatternStartTick == tick )
-		//		      || ( ( tick - m_nPatternStartTick ) % 48 == 0 ) ) {
+		// if (  ( m_nPatternStartTick == tick ) || ( ( tick - m_nPatternStartTick ) % 48 == 0 ) ) 
 		if ( m_nPatternTickPosition % 48 == 0 ) {
 			float fPitch;
 			float fVelocity;
@@ -1345,9 +1315,7 @@ inline int audioEngine_updateNoteQueue( unsigned nFrames )
 				}
 			}
 		}
-		++tick;
 	}
-
 
 	// audioEngine_process must send the pattern change event after mutex unlock
 	if ( bSendPatternChange ) {
@@ -1615,13 +1583,15 @@ void audioEngine_startAudioDrivers()
 				if ( ( m_pAudioDriver = createDriver( "CoreAudio" ) ) == NULL ) {
 					if ( ( m_pAudioDriver = createDriver( "PortAudio" ) ) == NULL ) {
 						if ( ( m_pAudioDriver = createDriver( "Oss" ) ) == NULL ) {
-							audioEngine_raiseError( Hydrogen::ERROR_STARTING_DRIVER );
-							___ERRORLOG( "Error starting audio driver" );
-							___ERRORLOG( "Using the NULL output audio driver" );
+							if ( ( m_pAudioDriver = createDriver( "PulseAudio" ) ) == NULL ) {
+								audioEngine_raiseError( Hydrogen::ERROR_STARTING_DRIVER );
+								___ERRORLOG( "Error starting audio driver" );
+								___ERRORLOG( "Using the NULL output audio driver" );
 
-							// use the NULL output driver
-							m_pAudioDriver = new NullDriver( audioEngine_process );
-							m_pAudioDriver->init( 0 );
+								// use the NULL output driver
+								m_pAudioDriver = new NullDriver( audioEngine_process );
+								m_pAudioDriver->init( 0 );
+							}
 						}
 					}
 				}
@@ -2209,63 +2179,38 @@ void Hydrogen::addRealtimeNote( int instrument,
 
 		assert( currentPattern );
 		if ( doRecord ) {
-			bool bNoteAlreadyExist = false;
-			Note::Key myKey = (Note::Key)0;
-			Note::Octave myOctave = (Note::Octave)0;
+			EventQueue::AddMidiNoteVector noteAction;
+			noteAction.m_column = column;
+			noteAction.m_pattern = currentPatternNumber;
+			noteAction.f_velocity = velocity;
+			noteAction.f_pan_L = pan_L;
+			noteAction.f_pan_R = pan_R;
+			noteAction.m_length = -1;
+			noteAction.b_isMidi = true;
 
-			if (pref->__playselectedinstrument) {
+			if ( pref->__playselectedinstrument ) {
 				instrRef = pSong->get_instrument_list()->get( getSelectedInstrumentNumber() );
 				int divider = msg1 / 12;
-				myKey = (Note::Key)(msg1 - (12 * divider));
-				myOctave = (Note::Octave)(divider -3);
-			} else {
-				instrRef = pSong->get_instrument_list()->get( m_nInstrumentLookupTable[ instrument ] );
-			}
-
-			Note* pNoteold = currentPattern->find_note( column, -1, instrRef, myKey, myOctave );
-			if ( pNoteold ) bNoteAlreadyExist = true;
-
-			if ( ! pref->__playselectedinstrument ) {
-				EventQueue::AddMidiNoteVector noteAction;
-				noteAction.m_column = column;
-				noteAction.m_row =  m_nInstrumentLookupTable[ instrument ];
-				noteAction.m_pattern = currentPatternNumber;
-				noteAction.f_velocity = velocity;
-				noteAction.f_pan_L = pan_L;
-				noteAction.f_pan_R = pan_R;
-				noteAction.m_length = -1;
-				noteAction.no_octaveKeyVal = (Note::Octave)0;
-				noteAction.nk_noteKeyVal = (Note::Key)0;
-				noteAction.b_isInstrumentMode = false;
-				noteAction.b_isMidi = true;
-				noteAction.b_noteExist = bNoteAlreadyExist;
-				EventQueue::get_instance()->m_addMidiNoteVector.push_back(noteAction);
-
-				// hear note if its not in the future
-				if ( pref->getHearNewNotes() && position <= getTickPosition() )
-					hearnote = true;
-			} else if ( pref->__playselectedinstrument ) {
-				EventQueue::AddMidiNoteVector noteAction;
-				noteAction.m_column = column;
 				noteAction.m_row = getSelectedInstrumentNumber();
-				noteAction.m_pattern = currentPatternNumber;
-				noteAction.f_velocity = velocity;
-				noteAction.f_pan_L = pan_L;
-				noteAction.f_pan_R = pan_R;
-				noteAction.m_length = -1;
-
-				int divider = msg1 / 12;
 				noteAction.no_octaveKeyVal = (Note::Octave)(divider -3);
 				noteAction.nk_noteKeyVal = (Note::Key)(msg1 - (12 * divider));
 				noteAction.b_isInstrumentMode = true;
-				noteAction.b_isMidi = true;
-				noteAction.b_noteExist = bNoteAlreadyExist;
-				EventQueue::get_instance()->m_addMidiNoteVector.push_back(noteAction);
-
-				// hear note if its not in the future
-				if ( pref->getHearNewNotes() && position <= getTickPosition() )
-					hearnote = true;
+			} else {
+				instrRef = pSong->get_instrument_list()->get( m_nInstrumentLookupTable[ instrument ] );
+				noteAction.m_row =  m_nInstrumentLookupTable[ instrument ];
+				noteAction.no_octaveKeyVal = (Note::Octave)0;
+				noteAction.nk_noteKeyVal = (Note::Key)0;
+				noteAction.b_isInstrumentMode = false;
 			}
+
+			Note* pNoteold = currentPattern->find_note( noteAction.m_column, -1, instrRef, noteAction.nk_noteKeyVal, noteAction.no_octaveKeyVal );
+			noteAction.b_noteExist = ( pNoteold ) ? true : false;
+
+			EventQueue::get_instance()->m_addMidiNoteVector.push_back(noteAction);
+
+			// hear note if its not in the future
+			if ( pref->getHearNewNotes() && position <= getTickPosition() )
+				hearnote = true;
 		} /* if doRecord */
 	} else if ( pref->getHearNewNotes() ) {
 			hearnote = true;
@@ -2327,11 +2272,9 @@ unsigned long Hydrogen::getRealtimeTickPosition()
 			+ ( deltatime.tv_usec / 1000000.0 )
 			+ ( m_pAudioDriver->getBufferSize() / ( double )sampleRate );
 
-	retTick = ( unsigned long ) ( ( sampleRate
-									/ ( double ) m_pAudioDriver->m_transport.m_nTickSize )
-								  * deltaSec );
+	retTick = ( unsigned long ) ( ( sampleRate / ( double ) m_pAudioDriver->m_transport.m_nTickSize ) * deltaSec );
 
-	retTick = initTick + retTick;
+	retTick += initTick;
 
 	return retTick;
 }
@@ -2379,6 +2322,16 @@ void Hydrogen::sequencer_setNextPattern( int pos )
 int Hydrogen::getPatternPos()
 {
 	return m_nSongPos;
+}
+
+/* Return pattern for selected song tick position */
+int Hydrogen::getPosForTick( unsigned long TickPos )
+{
+	Song* pSong = getSong();
+	if ( ! pSong ) return 0;
+
+	int patternStartTick;
+	return findPatternInTick( TickPos, pSong->is_loop_enabled(), &patternStartTick );
 }
 
 void Hydrogen::restartDrivers()
@@ -2900,13 +2853,11 @@ void Hydrogen::setTapTempo( float fInterval )
 void Hydrogen::setBPM( float fBPM )
 {
 	Song* pSong = getSong();
+	if ( ! m_pAudioDriver || ! pSong ) return;
 
-	if ( m_pAudioDriver && pSong ) {
-		m_pAudioDriver->setBpm( fBPM );
-		pSong->__bpm = fBPM;
-		m_nNewBpmJTM = fBPM;
-		// audioEngine_process_checkBPMChanged();
-	}
+	m_pAudioDriver->setBpm( fBPM );
+	pSong->__bpm = fBPM;
+	setNewBpmJTM ( fBPM );
 }
 
 void Hydrogen::restartLadspaFX()
@@ -3300,24 +3251,53 @@ unsigned int Hydrogen::__getMidiRealtimeNoteTickPosition()
 }
 
 
-void Hydrogen::setTimelineBpm()
+// Get TimelineBPM for Pos
+float Hydrogen::getTimelineBpm( int Beat )
 {
 	Song* pSong = getSong();
 
+	// We need return something
+	if ( ! pSong ) return getNewBpmJTM();
+
+	float bpm = pSong->__bpm;
+
+	// Pattern mode don't use timeline
+	if ( pSong->get_mode() == Song::PATTERN_MODE )
+		return bpm;
+
 	//time line test
-	if ( Preferences::get_instance()->getUseTimelineBpm() ) {
-		float bpm = pSong->__bpm;
+	if ( ! Preferences::get_instance()->getUseTimelineBpm() )
+		return bpm;
 
-		for ( int i = 0; i < static_cast<int>(m_pTimeline->m_timelinevector.size() ); i++) {
-			if ( m_pTimeline->m_timelinevector[i].m_htimelinebeat > getPatternPos() )
-				break;
+	for ( int i = 0; i < static_cast<int>(m_pTimeline->m_timelinevector.size()); i++) {
+		if ( m_pTimeline->m_timelinevector[i].m_htimelinebeat > Beat )
+			break;
 
-			bpm = m_pTimeline->m_timelinevector[i].m_htimelinebpm;
-		}
-
-		if ( bpm != pSong->__bpm )
-			setBPM( bpm );
+		bpm = m_pTimeline->m_timelinevector[i].m_htimelinebpm;
 	}
+
+	return bpm;
+}
+
+void Hydrogen::setTimelineBpm()
+{
+	//time line test
+	if ( ! Preferences::get_instance()->getUseTimelineBpm() ) return;
+
+	// Update "engine" BPM
+	Song* pSong = getSong();
+	float BPM = getTimelineBpm ( getPatternPos() );
+	if ( BPM != pSong->__bpm )
+		setBPM( BPM );
+
+	// Update "realtime" BPM
+	unsigned long PlayTick = getRealtimeTickPosition();
+	int RealtimePatternPos = getPosForTick ( PlayTick );
+	float RealtimeBPM = getTimelineBpm ( RealtimePatternPos );
+
+	// FIXME: this was already done in setBPM but for "engine" time
+	//        so this is actually forcibly overwritten here
+	setNewBpmJTM( RealtimeBPM );
 }
 
 #ifdef H2CORE_HAVE_NSMSESSION

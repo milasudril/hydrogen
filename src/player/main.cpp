@@ -32,6 +32,7 @@
 #include <hydrogen/event_queue.h>
 #include <hydrogen/audio_engine.h>
 #include <hydrogen/helpers/filesystem.h>
+#include <hydrogen/midi_map.h>
 
 using std::cout;
 using std::endl;
@@ -52,20 +53,18 @@ int main(int argc, char** argv){
 	H2Core::Logger* logger = H2Core::Logger::get_instance();
 	H2Core::Object::bootstrap( logger, logger->should_log(H2Core::Logger::Debug) );
 
+	QApplication a(argc, argv);
+
 	H2Core::Filesystem::bootstrap( logger );
-
-
 
 	if (argc != 2) {
 		usage();
 	}
 	cout << "Hydrogen player starting..." << endl << endl;
 
-	QApplication a(argc, argv);
-
 	QString filename = argv[1];
 
-
+	MidiMap::create_instance();
 	H2Core::Preferences::create_instance();
 	H2Core::Hydrogen::create_instance();
 	H2Core::Preferences *preferences = H2Core::Preferences::get_instance();
